@@ -119,8 +119,10 @@ export const SEARCH_ISSUES_QUERY = `query searchIssues($term: String!, $first: I
 // across caching, tests and request logging. An explicit state-name selection always
 // wins over the default scope: picking the Done chip means seeing Done tickets. When
 // closed states are not shown, completed, canceled and duplicated work is hidden.
-export function listIssueFilter(stateNames?: string[], showClosed?: boolean, relation?: "blocking" | "blocked"): Record<string, unknown> {
-  const filter: Record<string, unknown> = { assignee: { isMe: { eq: true } } };
+export function listIssueFilter(stateNames?: string[], showClosed?: boolean, relation?: "blocking" | "blocked", scope: "mine" | "all" = "mine", projectId?: string): Record<string, unknown> {
+  const filter: Record<string, unknown> = {};
+  if (scope !== "all") filter.assignee = { isMe: { eq: true } };
+  if (projectId) filter.project = { id: { eq: projectId } };
   const state: Record<string, unknown> = {};
   const names = [...new Set((stateNames ?? []).map((name) => name.trim()).filter(Boolean))].sort();
   if (names.length) state.name = { in: names };
@@ -223,9 +225,21 @@ export class LinearService {
     return work(key);
   }
 
-  async issues(cursor?: string, stateNames?: string[], showClosed?: boolean, relation?: "blocking" | "blocked") {
+  async issues(cursor?: string, stateNames?: string[], showClosed?: boolean, relation?: "blocking" | "blocked", scope: "mine" | "all" = "mine", projectId?: string) {
     return this.withKey(async (key) =>
-      issuePage(record(await this.post(key, LIST_ISSUES_QUERY, { first: 50, after: cursor ?? null, filter: listIssueFilter(stateNames, showClosed, relation) })).issues));
+      issuePage(record(await this.post(key, LIST_ISSUES_QUERY, { first: 50, after: cursor ?? null, filter: listIssueFilter(stateNames, showClosed, relation, scope, projectId) })).issues));
+  }
+
+  async workspaceProjects(): Promise<{ id: string; name: string }[]> {
+    return this.withKey(async (key) => {
+      const data = record(await this.post(key, "query workspaceProjects($first: Int!) { projects(first: $first) { nodes { id name } } }", { first: 250 }));
+      const nodes = data.projects && typeof data.projects === "object" ? connection(record(data.projects)).nodes : [];
+      return nodes
+        .map((node) => record(node))
+        .filter((node) => typeof node.id === "string" && typeof node.name === "string" && node.id && node.name)
+        .map((node) => ({ id: node.id as string, name: node.name as string }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    });
   }
 
   // Linear's GraphQL exposes no aggregation, so chip counts come from a bounded pass over
@@ -342,5 +356,59 @@ export class LinearService {
       return { changed: false, note: `Linear reported that the change to ${target.name} was not applied; the ticket is unchanged.` };
     }
     return { changed: true };
+  }
+
+  // Person-driven writes for the ticket detail view. Unlike markInProgress these
+  // throw on failure so the UI can surface the error next to its confirm step.
+  async issueStatuses(id: string): Promise<{ id: string; name: string; type: string }[]> {
+    const detail = await this.detail(id);
+    if (!detail.teamId) return [];
+    return (await this.teamStates(detail.teamId)).map(({ id, name, type }) => ({ id, name, type }));
+  }
+
+  async commentIssue(id: string, body: string): Promise<{ posted: boolean; url: string | null }> {
+    const data = record(
+      await this.withKey((key) =>
+        this.post(key, "mutation comment($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { url } } }", {
+          input: { issueId: id, body },
+        }),
+      ),
+    );
+    const result = data.commentCreate && typeof data.commentCreate === "object" ? record(data.commentCreate) : {};
+    if (result.success !== true) throw new Error("Linear did not create the comment.");
+    const comment = result.comment && typeof result.comment === "object" ? record(result.comment) : {};
+    return { posted: true, url: typeof comment.url === "string" ? comment.url : null };
+  }
+
+  async setIssueStatus(id: string, status: string): Promise<{ changed: boolean; status: string }> {
+    const detail = await this.detail(id);
+    if (!detail.teamId) throw new Error("This ticket has no team, so its status cannot be changed.");
+    const states = await this.teamStates(detail.teamId);
+    const wanted = status.trim().toLowerCase();
+    const target = states.find((state) => state.name.trim().toLowerCase() === wanted);
+    const allowed = states.filter((state) => !["canceled", "duplicate"].includes(state.type)).map((state) => state.name);
+    if (!target) throw new Error("Unknown status. Choose one of: " + (allowed.join(", ") || "none"));
+    if (["canceled", "duplicate"].includes(target.type)) throw new Error(`Only a person can move a ticket to ${target.name} — and only from Linear itself.`);
+    if (detail.issue.status === target.name) return { changed: false, status: target.name };
+    const data = record(
+      await this.withKey((key) => this.post(key, UPDATE_ISSUE_STATE_QUERY, { id, stateId: target.id })),
+    );
+    const result = data.issueUpdate && typeof data.issueUpdate === "object" ? record(data.issueUpdate) : {};
+    if (result.success !== true) throw new Error("Linear did not apply the status change.");
+    return { changed: true, status: target.name };
+  }
+
+  async setIssuePriority(id: string, priority: number): Promise<{ changed: boolean; priority: number }> {
+    const data = record(
+      await this.withKey((key) =>
+        this.post(key, "mutation priority($id: String!, $priority: Int!) { issueUpdate(id: $id, input: { priority: $priority }) { success issue { priority } } }", {
+          id,
+          priority,
+        }),
+      ),
+    );
+    const result = data.issueUpdate && typeof data.issueUpdate === "object" ? record(data.issueUpdate) : {};
+    if (result.success !== true) throw new Error("Linear did not apply the priority change.");
+    return { changed: true, priority };
   }
 }

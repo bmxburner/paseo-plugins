@@ -3,7 +3,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Linking, Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { branchesRpc, cachedOverviewRpc, connectRpc, countIssuesRpc, issueContextRpc, disconnectRpc, getDefaultPromptRpc, getSettingsRpc, listIssuesRpc, launchAgentRpc, searchIssuesRpc, setDefaultPromptRpc, setSettingsRpc, statusRpc, type Issue, type RelatedTicket, type TicketDetail } from "../shared/contracts";
+import { branchesRpc, cachedOverviewRpc, commentIssueRpc, connectRpc, countIssuesRpc, issueContextRpc, disconnectRpc, getDefaultPromptRpc, getSettingsRpc, issueStatusesRpc, listIssuesRpc, launchAgentRpc, projectsRpc, searchIssuesRpc, setDefaultPromptRpc, setIssuePriorityRpc, setIssueStatusRpc, setSettingsRpc, statusRpc, type Issue, type IssueScope, type RelatedTicket, type TicketDetail } from "../shared/contracts";
 import { filterIssues, formatIssueDate, formatPriority, formatRelativeDate, hasPriority, issueStatus, statusChangesText, statusCounts, type DependencyFilter, type SortDirection, type SortField } from "./issue-list";
 
 import { ChoicePicker } from "./choice-picker";
@@ -33,6 +33,8 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
   const getBranches = useRpc(branchesRpc);
   const getStatus = useRpc(statusRpc), connect = useRpc(connectRpc), disconnect = useRpc(disconnectRpc);
   const getIssues = useRpc(listIssuesRpc), getIssuesCount = useRpc(countIssuesRpc), getCachedOverview = useRpc(cachedOverviewRpc), getDetail = useRpc(issueContextRpc), start = useRpc(launchAgentRpc);
+  const getStatuses = useRpc(issueStatusesRpc), postComment = useRpc(commentIssueRpc), applyStatus = useRpc(setIssueStatusRpc), applyPriority = useRpc(setIssuePriorityRpc);
+  const getLinearProjects = useRpc(projectsRpc);
   const searchAll = useRpc(searchIssuesRpc);
   const getTemplate = useRpc(getDefaultPromptRpc), saveTemplate = useRpc(setDefaultPromptRpc);
   const getSettings = useRpc(getSettingsRpc), saveSettings = useRpc(setSettingsRpc);
@@ -54,6 +56,17 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [dependency, setDependency] = useState<DependencyFilter>("all");
+  const [scope, setScope] = useState<IssueScope>("mine");
+  const scopeRef = useRef<IssueScope>("mine");
+  const [linearProjects, setLinearProjects] = useState<{ id: string; name: string }[]>([]);
+  const [linearProjectId, setLinearProjectId] = useState("");
+  const projectRef = useRef("");
+  const [statusOptions, setStatusOptions] = useState<{ id: string; name: string; type: string }[]>([]);
+  const [statusesLoading, setStatusesLoading] = useState(false);
+  const [pendingStatus, setPendingStatus] = useState<string | null>(null);
+  const [commentText, setCommentText] = useState("");
+  const [confirmComment, setConfirmComment] = useState(false);
+  const [pendingPriority, setPendingPriority] = useState<number | null>(null);
   const [showClosed, setShowClosed] = useState(false);
   const [dateField, setDateField] = useState<SortField>("updatedAt");
   const [dateDirection, setDateDirection] = useState<SortDirection>("newest");
@@ -114,12 +127,14 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
     finally { busyRef.current = false; setBusy(null); }
   };
 
-  const loadIssues = useCallback(async (next?: string, filter?: { status: string | null; dependency?: DependencyFilter }) => {
-    const f = filter ?? { status: statusRef.current, dependency: dependencyRef.current };
+  const loadIssues = useCallback(async (next?: string, filter?: { status: string | null; dependency?: DependencyFilter; scope?: IssueScope; project?: string }) => {
+    const f = filter ?? { status: statusRef.current, dependency: dependencyRef.current, scope: scopeRef.current, project: projectRef.current };
     const page = await getIssues({
       ...(next ? { cursor: next } : {}),
       ...(f.status ? { stateNames: [f.status] } : {}),
       ...(f.dependency && f.dependency !== "all" ? { relation: f.dependency } : {}),
+      ...(f.scope && f.scope !== "mine" ? { scope: f.scope } : {}),
+      ...(f.project ? { projectId: f.project } : {}),
     });
     if (next && page.nextCursor === next) throw new Error("Linear repeated a page. Refresh the ticket list to continue.");
     setIssues((previous) => [...new Map((next ? [...previous, ...page.issues] : page.issues).map((issue) => [issue.id, issue])).values()]);
@@ -131,6 +146,10 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
   const refreshCounts = useCallback(async () => {
     try { setCounts(await getIssuesCount({})); } catch { /* counts are non-critical; the list still loads without them */ }
   }, [getIssuesCount]);
+
+  const loadLinearProjects = useCallback(async () => {
+    try { setLinearProjects((await getLinearProjects({})).projects); } catch { /* project filter stays hidden; the list still loads */ }
+  }, [getLinearProjects]);
 
   const loadAllIssues = async () => {
     let next = cursor;
@@ -187,6 +206,7 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
         if (!Number.isFinite(cachedTime) || Date.now() - cachedTime >= CACHE_MAX_AGE_MS) {
           await loadIssues(undefined, { status: null }); void refreshCounts();
         } else if (!cached?.counts) void refreshCounts();
+        void loadLinearProjects();
       }
     });
     void loadOptions();
@@ -211,6 +231,7 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
   useEffect(() => {
     let cancelled = false;
     setDetail(null); setDetailError(null); setShowContext(false); setShowRelatedTickets(false); setContextCopied(false);
+    setStatusOptions([]); setPendingStatus(null); setCommentText(""); setConfirmComment(false); setPendingPriority(null);
     if (!selected) { setDetailLoading(false); return; }
     setDetailLoading(true);
     void getDetail({ id: selected.id }).then((value) => {
@@ -219,6 +240,10 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
   }, [selected, getDetail, detailVersion]);
+
+  useEffect(() => {
+    if (detail && selected && detail.issue.id === selected.id) loadStatuses();
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -355,11 +380,31 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
           : !detail ? "Loading ticket details…" : "";
   const changeStatus = (name: string | null) => {
     statusRef.current = name; setStatus(name); setIssues([]); setCursor(null);
-    void run("Loading tickets", async () => { await loadIssues(undefined, { status: name, dependency: dependencyRef.current }); });
+    void run("Loading tickets", async () => { await loadIssues(undefined, { status: name, dependency: dependencyRef.current, scope: scopeRef.current, project: projectRef.current }); });
   };
   const changeDependency = (value: DependencyFilter) => {
     dependencyRef.current = value; setDependency(value); setIssues([]); setCursor(null);
-    void run("Loading tickets", async () => { await loadIssues(undefined, { status: statusRef.current, dependency: value }); });
+    void run("Loading tickets", async () => { await loadIssues(undefined, { status: statusRef.current, dependency: value, scope: scopeRef.current, project: projectRef.current }); });
+  };
+  const changeScope = (value: IssueScope) => {
+    scopeRef.current = value; setScope(value); setIssues([]); setCursor(null);
+    void run("Loading tickets", async () => { await loadIssues(undefined, { status: statusRef.current, dependency: dependencyRef.current, scope: value, project: projectRef.current }); });
+  };
+  const changeProject = (value: string) => {
+    projectRef.current = value; setLinearProjectId(value); setIssues([]); setCursor(null);
+    void run("Loading tickets", async () => { await loadIssues(undefined, { status: statusRef.current, dependency: dependencyRef.current, scope: scopeRef.current, project: value }); });
+  };
+  const refreshDetail = () => {
+    setDetailVersion((value) => value + 1);
+    void loadIssues(undefined, { status: statusRef.current, dependency: dependencyRef.current, scope: scopeRef.current, project: projectRef.current }).catch(() => {});
+  };
+  const loadStatuses = () => {
+    if (!selected || statusesLoading || statusOptions.length) return;
+    setStatusesLoading(true);
+    void getStatuses({ id: selected.id }).then(
+      (value) => setStatusOptions(value.statuses),
+      () => setStatusOptions([]),
+    ).finally(() => setStatusesLoading(false));
   };
   const choose = (issue: Issue) => {
     setSelected(issue); setAgent(null); setError(null); setInstructions(""); launchRequest.current = null;
@@ -466,7 +511,7 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
         setShowClosed(next);
         setShowClosed((await saveSettings({ showClosed: next })).showClosed);
         setStatus(null); setIssues([]); setCursor(null);
-        await loadIssues(undefined, { status: null });
+        await loadIssues(undefined, { status: null, scope: scopeRef.current, project: projectRef.current });
         void refreshCounts();
       })} />
     <Text style={t.muted}>Off keeps the list focused on open work; finished, canceled and duplicated tickets stay hidden from the list and the counts.</Text>
@@ -558,11 +603,11 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
       <TextInput accessibilityLabel="Linear API key" secureTextEntry autoCapitalize="none" autoCorrect={false} value={key} onChangeText={setKey} placeholder="lin_api_…" placeholderTextColor={colors.foregroundMuted} style={t.input} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <Button title="Connect Linear" icon="Plug" primary disabled={!key.trim()} onPress={() => void run("Connecting Linear", async () => {
-          setConnection(await connect({ apiKey: key.trim() })); setKey(""); await loadIssues(); void refreshCounts();
+          setConnection(await connect({ apiKey: key.trim() })); setKey(""); await loadIssues(); void refreshCounts(); void loadLinearProjects();
         })} />
         <Button title="Retry saved connection" icon="RefreshCw" onPress={() => void run("Loading connection", async () => {
           const status = await getStatus({}); setConnection(status);
-          if (status.connected) { await loadIssues(); void refreshCounts(); }
+          if (status.connected) { await loadIssues(); void refreshCounts(); void loadLinearProjects(); }
         })} />
       </View>
     </View> : <>
@@ -603,6 +648,54 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
               <MetaItem icon="Clock" label="Updated" value={formatRelativeDate(current.updatedAt)} t={t} />
               {current.dueDate && <MetaItem icon="CalendarClock" label="Due" value={formatIssueDate(current.dueDate)} t={t} />}
               {current.estimate ? <MetaItem icon="Hash" label="Estimate" value={`${current.estimate} pts`} t={t} /> : null}
+            </View>
+
+            <Divider t={t} spaced />
+            <FieldLabel title="Operate" icon="Wrench" hint="writes to Linear with confirmation" t={t} />
+            <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              <Text style={{ ...t.muted, fontWeight: "700", width: 74 }}>Status</Text>
+              <View style={{ flex: 1, minWidth: 180 }}>
+                <ChoicePicker label="Status" icon="ListTodo" placeholder={statusesLoading ? "Loading states…" : "Choose a state"}
+                  options={statusOptions.map((state) => ({ id: state.name, label: state.name, description: state.type }))}
+                  value={pendingStatus ?? ""} onChange={(id) => setPendingStatus(id || null)} t={t} disabled={Boolean(busy) || statusesLoading} />
+              </View>
+              {pendingStatus && <>
+                <Button title="Confirm" icon="Check" primary size="sm" disabled={Boolean(busy)} onPress={() => void run("Updating status", async () => {
+                  if (!selected) return;
+                  await applyStatus({ id: selected.id, status: pendingStatus });
+                  setPendingStatus(null); refreshDetail();
+                })} />
+                <Button title="Cancel" icon="X" size="sm" onPress={() => setPendingStatus(null)} />
+              </>}
+            </View>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              <Text style={{ ...t.muted, fontWeight: "700", width: 74 }}>Priority</Text>
+              {[0, 1, 2, 3, 4].map((level) => <Button key={level} size="sm"
+                title={level === 0 ? "None" : level === 1 ? "Urgent" : level === 2 ? "High" : level === 3 ? "Medium" : "Low"}
+                chosen={pendingPriority === level}
+                onPress={() => setPendingPriority(pendingPriority === level ? null : level)} />)}
+              {pendingPriority !== null && <>
+                <Button title="Confirm" icon="Check" primary size="sm" disabled={Boolean(busy)} onPress={() => void run("Updating priority", async () => {
+                  if (!selected || pendingPriority === null) return;
+                  await applyPriority({ id: selected.id, priority: pendingPriority });
+                  setPendingPriority(null); refreshDetail();
+                })} />
+                <Button title="Cancel" icon="X" size="sm" onPress={() => setPendingPriority(null)} />
+              </>}
+            </View>
+            <TextInput accessibilityLabel="Comment on this ticket" editable={!busy} multiline maxLength={20000} value={commentText} onChangeText={(value) => { setCommentText(value); setConfirmComment(false); }}
+              placeholder="Write a comment…" placeholderTextColor={colors.foregroundMuted} style={{ ...t.input, minHeight: 64, textAlignVertical: "top" }} />
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              {!confirmComment
+                ? <Button title="Post comment" icon="MessageSquare" disabled={Boolean(busy) || !commentText.trim()} onPress={() => setConfirmComment(true)} />
+                : <>
+                  <Button title="Confirm post" icon="Check" primary disabled={Boolean(busy)} onPress={() => void run("Posting comment", async () => {
+                    if (!selected) return;
+                    await postComment({ id: selected.id, body: commentText.trim() });
+                    setCommentText(""); setConfirmComment(false); refreshDetail();
+                  })} />
+                  <Button title="Cancel" icon="X" onPress={() => setConfirmComment(false)} />
+                </>}
             </View>
 
             {detail && statusChangesText(detail.context) && <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -742,6 +835,14 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
             <Button size="sm" title={`All · ${counts ? (counts.complete ? counts.total : `${counts.total}+`) : issues.length}`} chosen={status === null} onPress={() => changeStatus(null)} />
             {statuses.map(([name, count]) => <Button key={name} size="sm" title={`${name} · ${count}`} chosen={status === name} leading={<StatusMark status={name} statusType={statusTypeFor(name)} t={t} />}
               onPress={() => changeStatus(status === name ? null : name)} />)}
+          </View>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
+            <FieldLabel title="Scope" icon="Users" t={t} />
+            <Segmented t={t} label="Ticket scope" value={scope} onChange={(value) => changeScope(value)}
+              options={[{ value: "mine" as IssueScope, label: "Mine", icon: "User" }, { value: "all" as IssueScope, label: "All", icon: "Globe" }]} />
+            {linearProjects.length > 0 && <Segmented t={t} label="Project" value={linearProjectId} onChange={(id) => changeProject(id)}
+              options={[{ value: "", label: "All projects" }, ...linearProjects.map((item) => ({ value: item.id, label: item.name }))]} />}
+            {(scope === "all" || linearProjectId) && <Text style={t.muted}>Status counts still reflect your tickets.</Text>}
           </View>
           <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
             <FieldLabel title="Dependencies" icon="GitBranch" t={t} />

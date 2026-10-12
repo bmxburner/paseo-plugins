@@ -41,7 +41,7 @@ const noMark = { markInProgress: async () => ({ changed: false }) };
 test("server entrypoint loads and registers valid Paseo RPC contracts", () => {
   const names: string[] = [];
   const cleanup = contribute({ handle(contract: { name: string }) { names.push(contract.name); } } as unknown as PluginServerContext);
-  assert.deepEqual(names, ["linear.status", "linear.connect", "linear.disconnect", "linear.list-issues", "linear.count-issues", "linear.cached-overview", "linear.search-issues", "linear.issue-context", "linear.project-branches", "linear.get-default-prompt", "linear.set-default-prompt", "linear.get-settings", "linear.set-settings", "linear.launch-agent"]);
+  assert.deepEqual(names, ["linear.status", "linear.connect", "linear.disconnect", "linear.list-issues", "linear.count-issues", "linear.cached-overview", "linear.search-issues", "linear.issue-context", "linear.projects", "linear.issue-statuses", "linear.comment-issue", "linear.set-issue-status", "linear.set-issue-priority", "linear.project-branches", "linear.get-default-prompt", "linear.set-default-prompt", "linear.get-settings", "linear.set-settings", "linear.launch-agent"]);
   cleanup();
 });
 
@@ -864,4 +864,75 @@ test("launch marks the ticket in progress only when opted in, and demotes failur
   const mutations = calls.filter(([query]) => query === UPDATE_ISSUE_STATE_QUERY);
   assert.equal(mutations.length, 1);
   assert.deepEqual(mutations[0][1], { id: "issue-1", stateId: "ip" });
+});
+
+test("the all scope drops the assignee filter while mine keeps it", () => {
+  assert.deepEqual(listIssueFilter(undefined, false, undefined, "all"), {
+    state: { type: { nin: ["completed", "canceled", "duplicate"] } },
+  });
+  assert.deepEqual(
+    listIssueFilter(undefined, false, undefined, "mine"),
+    listIssueFilter(),
+  );
+});
+
+test("detail-view writes post comments, move status with guards, and set priority", async () => {
+  const calls: PostCall[] = [];
+  const states = [
+    { id: "todo", name: "Todo", type: "unstarted", position: 1 },
+    { id: "ip", name: "In Progress", type: "started", position: 2 },
+    { id: "done", name: "Done", type: "completed", position: 3 },
+    { id: "cx", name: "Canceled", type: "canceled", position: 4 },
+  ];
+  const service = new LinearService(
+    new Credentials("/unused", "env-key"),
+    async (key, query, variables) => {
+      calls.push({ key, query, variables });
+      if (query === ISSUE_DETAIL_QUERY)
+        return {
+          issue: { ...rawIssue, state: { name: "Todo", type: "unstarted" } },
+          viewer: { id: "u" },
+        };
+      if (query === COMMENT_QUERY)
+        return { issue: { comments: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      if (query === TEAM_STATES_QUERY) return { team: { states: { nodes: states } } };
+      if (query.includes("commentCreate"))
+        return { commentCreate: { success: true, comment: { url: "https://linear.app/x#c1" } } };
+      if (query.includes("mutation priority("))
+        return { issueUpdate: { success: true, issue: { priority: 2 } } };
+      return { issueUpdate: { success: true, issue: { state: { name: "In Progress" } } } };
+    },
+  );
+
+  assert.deepEqual(await service.issueStatuses("ENG-42"), states.map(({ id, name, type }) => ({ id, name, type })));
+  assert.deepEqual(await service.commentIssue("issue-1", "hello"), {
+    posted: true,
+    url: "https://linear.app/x#c1",
+  });
+  assert.deepEqual(await service.setIssueStatus("issue-1", "in progress"), {
+    changed: true,
+    status: "In Progress",
+  });
+  await assert.rejects(service.setIssueStatus("issue-1", "Nope"), /Unknown status/);
+  await assert.rejects(service.setIssueStatus("issue-1", "canceled"), /Only a person/);
+  assert.deepEqual(await service.setIssuePriority("issue-1", 2), { changed: true, priority: 2 });
+  const priorityCall = calls.find((call) => call.query.includes("mutation priority("));
+  assert.deepEqual(priorityCall?.variables, { id: "issue-1", priority: 2 });
+});
+
+test("project filtering narrows the list without touching the assignee scope", async () => {
+  assert.deepEqual(listIssueFilter(undefined, false, undefined, "mine", "proj-1"), {
+    assignee: { isMe: { eq: true } },
+    state: { type: { nin: ["completed", "canceled", "duplicate"] } },
+    project: { id: { eq: "proj-1" } },
+  });
+  const calls: PostCall[] = [];
+  const service = mockLinear(async (key, query, variables) => {
+    calls.push({ key, query, variables });
+    if (query.includes("projects(first:")) return { projects: { nodes: [{ id: "p1", name: "Coding" }, { id: "p2", name: "Music" }] } };
+    return { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } };
+  });
+  assert.deepEqual(await service.workspaceProjects(), [{ id: "p1", name: "Coding" }, { id: "p2", name: "Music" }]);
+  await service.issues(undefined, undefined, false, undefined, "all", "p1");
+  assert.deepEqual(calls[1].variables, { first: 50, after: null, filter: { state: { type: { nin: ["completed", "canceled", "duplicate"] } }, project: { id: { eq: "p1" } } } });
 });

@@ -74,6 +74,15 @@ export const statusRpc = defineRpc({ name: "linear.status", input: z.object({}),
 export const connectRpc = defineRpc({ name: "linear.connect", input: z.object({ apiKey: z.string().trim().min(1).max(4096) }), output: connectionSchema });
 export const disconnectRpc = defineRpc({ name: "linear.disconnect", input: z.object({}), output: connectionSchema });
 
+export const scopeSchema = z.enum(["mine", "all"]);
+export type IssueScope = z.infer<typeof scopeSchema>;
+
+export const projectsRpc = defineRpc({
+  name: "linear.projects",
+  input: z.object({}),
+  output: z.object({ projects: z.array(z.object({ id: z.string(), name: z.string() })) }),
+});
+
 export const listIssuesRpc = defineRpc({
   name: "linear.list-issues",
   // stateNames is a server-side selection (status chips); it takes precedence over the
@@ -84,6 +93,8 @@ export const listIssuesRpc = defineRpc({
     cursor: z.string().optional(),
     stateNames: z.array(z.string()).max(12).optional(),
     relation: z.enum(["blocking", "blocked"]).optional(),
+    scope: scopeSchema.default("mine"),
+    projectId: z.string().min(1).max(100).optional(),
   }),
   output: z.object({ issues: z.array(issueSchema), nextCursor: z.string().nullable() }),
 });
@@ -120,6 +131,32 @@ export const searchIssuesRpc = defineRpc({
   name: "linear.search-issues",
   input: z.object({ term: z.string().min(2).max(200), cursor: z.string().optional() }),
   output: z.object({ issues: z.array(issueSchema), nextCursor: z.string().nullable() }),
+});
+
+export const issueStatusesRpc = defineRpc({
+  name: "linear.issue-statuses",
+  input: z.object({ id: z.string().min(1) }),
+  output: z.object({
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), type: z.string() })),
+  }),
+});
+
+export const commentIssueRpc = defineRpc({
+  name: "linear.comment-issue",
+  input: z.object({ id: z.string().min(1), body: z.string().trim().min(1).max(20000) }),
+  output: z.object({ posted: z.boolean(), url: z.string().nullable() }),
+});
+
+export const setIssueStatusRpc = defineRpc({
+  name: "linear.set-issue-status",
+  input: z.object({ id: z.string().min(1), status: z.string().trim().min(1).max(200) }),
+  output: z.object({ changed: z.boolean(), status: z.string() }),
+});
+
+export const setIssuePriorityRpc = defineRpc({
+  name: "linear.set-issue-priority",
+  input: z.object({ id: z.string().min(1), priority: z.number().int().min(0).max(4) }),
+  output: z.object({ changed: z.boolean(), priority: z.number().int() }),
 });
 
 export const issueContextRpc = defineRpc({
