@@ -150,8 +150,9 @@ forget them. Mappings are stored per host in `settings.json`.
 
 ## Agent access to Linear
 
-Agents started from a ticket get a `linear_ticket` MCP server (on by default, **Settings →
-Agent access to Linear** turns it off). Its tools act only on the ticket the agent started from:
+Agents started from a ticket are told to prefer the `linear` CLI for Linear updates, with a
+`linear_ticket` MCP server as fallback (on by default, **Settings → Agent access to Linear**
+turns it off). The MCP tools act only on the ticket the agent started from:
 
 - `get_ticket` — fresh title, description, status, the team's workflow states, comments, links;
 - `add_comment` — post a Markdown comment;
@@ -159,13 +160,14 @@ Agent access to Linear** turns it off). Its tools act only on the ticket the age
   states are left to people);
 - `link_url` — attach an https link, such as the pull request.
 
-The launch prompt tells the agent to comment when it starts and finishes, link its pull request
-and move the ticket to review; custom templates can place that note with `{{linear_access}}`,
-and it is appended when they do not. The server is a dependency-free script written to
+The launch prompt tells the agent to prefer the `linear` CLI (falling back to its ticket MCP
+tools), comment when it starts and finishes, link its pull request and move the ticket to
+review; custom templates can place that note with `{{linear_access}}`, and it is appended
+when they do not. The server is a dependency-free script written to
 `$PASEO_HOME/linear-tickets/ticket-mcp-<hash>.mjs` and run with the daemon's own Node runtime
 (the desktop app's bundled runtime included), so it does not depend on `node` being on the
 agent's PATH. If the selected provider reports that it cannot load MCP servers, the launch
-returns a warning, since that agent has no Linear tools.
+returns a warning, since that agent has no MCP fallback (it can still use the `linear` CLI).
 The agent configuration carries only that path and the issue ID; the server reads the key at
 call time from `LINEAR_API_KEY` or the saved connection, so it needs a key with write access.
 Agents run as the same user as the daemon, so this scopes the tools, not the key: an agent
@@ -207,7 +209,8 @@ and apply to new agents only. **Reset to built-in** restores the default. The pe
 instructions field and the 200,000-character context limit apply as before.
 
 `{{linear_access}}` places the note about Linear access: with **Agent access to Linear** on,
-the agent is told to use its ticket tools; with it off, not to write to Linear. A template
+the agent is told to prefer the `linear` CLI (falling back to its ticket MCP tools); with it
+off, not to write to Linear. A template
 without the placeholder gets the note appended. Templates saved from the built-in default
 before 0.4.0 contain the old sentence "Do not post comments or change Linear status unless
 the user explicitly asks."; that sentence is treated as the placeholder, so the toggle

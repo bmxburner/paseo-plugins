@@ -478,7 +478,7 @@ export function LinearTicketsSurface({ theme, layout, navigation }: PluginSurfac
         setAgentLinearAccess(next);
         setAgentLinearAccess((await saveSettings({ agentLinearAccess: next })).agentLinearAccess);
       })} />
-    <Text style={t.muted}>On gives each new agent linear_ticket tools that act only on the ticket it started from, using this host's Linear key; canceling or marking duplicate stays with people. It needs a key with write access. Existing agents keep what they started with.</Text>
+    <Text style={t.muted}>On tells each new agent to prefer the `linear` CLI for its own ticket, falling back to linear_ticket tools that act only on the ticket it started from, using this host's Linear key; canceling or marking duplicate stays with people. It needs a key with write access. Existing agents keep what they started with.</Text>
     <Divider t={t} spaced />
     <FieldLabel title="Project mappings" icon="Folder" hint="Linear project → Paseo project" t={t} />
     {Object.keys(projectMappings).length ? Object.entries(projectMappings).sort((a, b) => a[1].label.localeCompare(b[1].label)).map(([key, mapping]) => {

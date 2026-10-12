@@ -13,9 +13,10 @@ export const DEFAULT_PROMPT_TEMPLATE = [
   "{{context}}",
 ].join("\n");
 
-// What the agent is told about changing Linear. With access on, the agent holds tools that
-// can only act on its own ticket; a template without {{linear_access}} gets this appended.
-export const LINEAR_ACCESS_NOTE = "You can update this ticket through the linear_ticket MCP tools (get_ticket, add_comment, set_status, link_url); they act only on this ticket. Post a short comment when you start, and a final comment with what changed, how it was verified and the pull request link. Attach the pull request with link_url and move the ticket to its review state (for example In Review) once a pull request is open. If you are blocked, say why in a comment. Do not change any other Linear ticket.";
+// What the agent is told about changing Linear. With access on, the agent prefers the
+// `linear` CLI and falls back to ticket-scoped MCP tools; a template without
+// {{linear_access}} gets this appended.
+export const LINEAR_ACCESS_NOTE = "Prefer the `linear` CLI for Linear updates (for example `linear get <id>`, `linear comment <id> --body \"...\"`, `linear status <id> <State>`; bare `linear` prints usage). Fall back to the linear_ticket MCP tools (get_ticket, add_comment, set_status, link_url) only if the CLI is unavailable; they act only on this ticket. Post a short comment when you start, and a final comment with what changed, how it was verified and the pull request link. Attach the pull request with link_url (or include its URL in a `linear comment` when using the CLI) and move the ticket to its review state (for example In Review) once a pull request is open. If you are blocked, say why in a comment. Do not change any other Linear ticket.";
 export const NO_LINEAR_ACCESS_NOTE = "Do not post comments or change Linear status unless the user explicitly asks.";
 
 export const issueSchema = z.object({
